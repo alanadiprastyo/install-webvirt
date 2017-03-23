@@ -1,0 +1,172 @@
+http://10.1.1.250:8000
+
+user: student
+password: rahasia
+
+#1. Create VM podX-kvm (clone dari podX-kvm-template. klik random mac address)
+
+#2. Login console ke podX-kvm
+user: root
+password: rahasia
+
+#3. Set IP dan hostname: nmtui
+
+#4. Ping dan SSH dari laptop ke podX-kvm
+
+#5. Cek prosesor mendukung virtualisasi:
+
+grep vmx /proc/cpuinfo => Intel
+grep svm /proc/cpuinfo => AMD
+
+#6. Nested Virtualization:
+
+cat /sys/module/kvm_intel/parameters/nested
+rmmod kvm-intel
+echo 'options kvm-intel nested=y' >> /etc/modprobe.d/dist.conf
+modprobe kvm-intel
+cat /sys/module/kvm_intel/parameters/nested
+
+#7. Repositori
+yum -y install centos-release-openstack-mitaka.noarch
+yum -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
+[ ! -d /etc/yum.repos.d.orig ] && cp -vR /etc/yum.repos.d /etc/yum.repos.d.orig
+rm -rf /etc/yum.repos.d/*
+curl -o /etc/yum.repos.d/centos-cloud-openstack-mitaka.repo http://10.1.1.250/repo/repositories-config/centos-cloud-openstack-mitaka.repo
+curl -o /etc/yum.repos.d/epel.repo http://10.1.1.250/repo/repositories-config/epel.repo
+yum repolist
+yum -y update
+reboot
+
+#8. NTP
+yum -y install chrony
+systemctl enable chronyd.service
+systemctl restart chronyd.service
+systemctl status chronyd.service
+chronyc sources
+
+
+########## Setup Host KVM + Libvirt ############
+#Referensi: https://www.webvirtmgr.net/docs/
+
+#1. Instal paket KVM
+yum -y install kvm libvirt
+
+#2. Edit file konfigurasi libvirt
+vi /etc/sysconfig/libvirtd
+
+LIBVIRTD_ARGS="--listen"
+
+
+vi /etc/libvirt/libvirtd.conf
+
+listen_tls = 0
+listen_tcp = 1
+
+#3. Restart service libvirt
+systemctl restart libvirtd
+systemctl enable libvirtd
+systemctl status libvirtd
+
+
+#4. Membuat user libvirt
+saslpasswd2 -a libvirt adam
+sasldblistusers2 -f /etc/libvirt/passwd.db
+
+
+#5. Allow port 16509/tcp di firewall
+firewall-cmd --permanent --add-port 16509/tcp
+firewall-cmd --reload
+firewall-cmd --list-all
+
+#6. Test koneksi ke libvirt
+virsh -c qemu+tcp://10.1.1.XX/system nodeinfo
+#[user & password yang dibuat di langkah no #4]
+
+
+#7. Error: Failed to connect socket to '/var/run/libvirt/virtlogd-sock'
+#Solusi: Aktifkan dan jalankan service virtlogd
+systemctl status virtlogd
+systemctl enable virtlogd
+systemctl restart virtlogd
+systemctl status virtlogd
+
+
+#8. Error: qemu: could not load PC BIOS 'bios-256k.bin
+#Solusi: Buat symlink bios-256k
+yum -y install seabios.x86_64
+ln -s /usr/share/seabios/bios.bin /usr/share/seabios/bios-256k.bin
+systemctl restart libvirtd
+systemctl status libvirtd
+
+
+
+########## Setup WebVirtMgr ############
+#Referensi: https://github.com/retspen/webvirtmgr/wiki/Install-WebVirtMgr
+
+#1. Instal paket
+yum -y install git python-pip libvirt-python libxml2-python python-websockify supervisor nginx gcc python-devel
+pip install numpy
+pip install --upgrade pip
+
+#2. Install python requirements and setup Django environment
+git clone git://github.com/retspen/webvirtmgr.git
+cd webvirtmgr
+pip install -r requirements.txt
+./manage.py syncdb
+./manage.py collectstatic
+cd ..
+mkdir /var/www
+mv webvirtmgr /var/www/
+
+#3. Set SELinux Policy
+/usr/sbin/setsebool httpd_can_network_connect true 
+
+#4. Setup Supervisor
+chown -R nginx:nginx /var/www/webvirtmgr
+vi /etc/supervisord.d/webvirtmgr.ini
+
+[program:webvirtmgr]
+command=/usr/bin/python /var/www/webvirtmgr/manage.py run_gunicorn -c /var/www/webvirtmgr/conf/gunicorn.conf.py
+directory=/var/www/webvirtmgr
+autostart=true
+autorestart=true
+logfile=/var/log/supervisor/webvirtmgr.log
+log_stderr=true
+user=nginx
+
+[program:webvirtmgr-console]
+command=/usr/bin/python /var/www/webvirtmgr/console/webvirtmgr-console
+directory=/var/www/webvirtmgr
+autostart=true
+autorestart=true
+stdout_logfile=/var/log/supervisor/webvirtmgr-console.log
+redirect_stderr=true
+user=nginx
+
+
+#5. Edit konfigurasi WebVirtMgr
+vi /var/www/webvirtmgr/conf/gunicorn.conf.py 
+
+#bind = '127.0.0.1:8000'
+bind = '10.1.1.XX:8000'
+
+
+#6. Restart service supervisor
+systemctl restart supervisord
+systemctl enable supervisord
+systemctl status supervisord
+
+
+#7. Allow port 8000/tcp di firewall
+firewall-cmd --permanent --add-port 8000/tcp
+firewall-cmd --permanent --add-port 6080/tcp
+firewall-cmd --permanent --add-port 5900-5999/tcp
+firewall-cmd --reload
+firewall-cmd --list-all
+
+
+#8. Test akses WebVirtMgr
+http://10.1.1.XX:8000
+
+
+
